@@ -1,0 +1,74 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+library(rsample)  # data splitting 
+library(dplyr)    # basic data manipulation procedures
+library(ggplot2)  # plotting
+library(recipes)
+
+# Create training (70%) and test (30%) sets for the AmesHousing::make_ames() data.
+# Use set.seed for reproducibility
+
+set.seed(123)
+ames_split <- initial_split(AmesHousing::make_ames(), prop = .7, strata = "Sale_Price")
+ames_train <- training(ames_split)
+ames_test  <- testing(ames_split)
+
+
+rec_obj <- recipe(Sale_Price ~ ., data = ames_train)
+standardized <- rec_obj %>%
+  step_meanimpute(all_numeric()) %>% 
+  step_dummy(all_predictors(), -all_numeric()) %>% 
+  step_nzv(all_predictors()) %>% 
+  step_center(all_predictors(), -all_nominal())  %>%
+  step_scale(all_predictors()) 
+
+
+trained_rec <- prep(standardized, training = ames_train)
+trained_rec
+train_data <- bake(trained_rec, newdata = ames_train)
+test_data  <- bake(trained_rec, newdata = ames_test)
+
+```
+
+```{r}
+library(caret)
+
+myFolds <- createFolds(train_data$Sale_Price, k = 3)
+
+fitControl = trainControl(method = "cv", number = 3, index = myFolds)
+
+
+# Run the train() function
+ranger <- train(Sale_Price ~ ., 
+                   data = train_data, 
+                   method = 'ranger',
+                   trControl = fitControl,
+                  tuneLength = 10,
+                  importance = "impurity")
+```
+
+```{r}
+ranger
+```
+```{r}
+preds = predict(ranger, test_data)
+R2(preds, test_data$Sale_Price)
+```
+
+
+```{r}
+library(tibble)
+imps = varImp(ranger)$importance %>% rownames_to_column()
+colnames(imps) = c('Column', 'Importance')
+```
+```{r}
+imps %>% ggplot(aes(reorder(Column, -Importance), Importance))+
+  geom_col()+
+  coord_flip()
+```
+

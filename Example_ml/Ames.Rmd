@@ -1,0 +1,155 @@
+---
+title: "Ames H2o"
+output: html_notebook
+---
+In this notebook I will be going through some model building using the Ames housing dataset in R.  In this scenario, I want to perform two different tasks, supervised regression and dimensionality reduction.  
+
+### Package Import:
+
+```{r, messages = FALSE}
+library(rsample)  # data splitting 
+library(dplyr)    # basic data manipulation procedures
+library(ggplot2)  # plotting
+library(h2o)
+library(tibble)
+# h20 setup
+h2o.init()
+```
+
+### Data splitting:
+
+```{r}
+# Create training (70%) and test (30%) sets for the AmesHousing::make_ames() data.
+# Use set.seed for reproducibility
+
+set.seed(123)
+ames_split <- initial_split(AmesHousing::make_ames(), prop = .7, strata = "Sale_Price")
+ames_train <- training(ames_split)
+ames_test  <- testing(ames_split)
+```
+
+### Glmnet model:
+
+```{r}
+# convert data to h2o object
+ames_h2o <- ames_train %>%
+  mutate(Sale_Price_log = log(Sale_Price)) %>%
+  as.h2o()
+
+# set the response column to Sale_Price_log
+response <- "Sale_Price_log"
+
+# set the predictor names
+predictors <- setdiff(colnames(ames_train), "Sale_Price")
+
+
+# try using the `alpha` parameter:
+# train your model, where you specify alpha
+ames_glm <- h2o.glm(
+  x = predictors, 
+  y = response, 
+  training_frame = ames_h2o,
+  nfolds = 10,
+  keep_cross_validation_predictions = TRUE,
+  alpha = .25
+  )
+
+# print the mse for the validation data
+print(h2o.mse(ames_glm, xval = TRUE))
+
+# grid over `alpha`
+# select the values for `alpha` to grid over
+hyper_params <- list(
+  alpha = seq(0, 1, by = .1),
+  lambda = seq(0.0001, 10, length.out = 10)
+  )
+
+# this example uses cartesian grid search because the search space is small
+# and we want to see the performance of all models. For a larger search space use
+# random grid search instead: {'strategy': "RandomDiscrete"}
+
+# build grid search with previously selected hyperparameters
+grid2 <- h2o.grid(
+  x = predictors, 
+  y = response, 
+  training_frame = ames_h2o, 
+  nfolds = 10,
+  keep_cross_validation_predictions = TRUE,
+  algorithm = "glm",
+  grid_id = "ames_grid", 
+  hyper_params = hyper_params,
+  search_criteria = list(strategy = "RandomDiscrete")
+  )
+
+# Sort the grid models by mse
+sorted_grid <- h2o.getGrid("ames_grid", sort_by = "mae", decreasing = FALSE)
+# grab top model id
+best_h2o_model <- sorted_grid@model_ids[[1]]
+best_model <- h2o.getModel(best_h2o_model)
+```
+
+
+```{r}
+coefs = data.frame(h2o.coef_norm(best_model)) %>% rownames_to_column() %>% arrange(desc(h2o.coef_norm.best_model.))
+
+coefs %>% head()
+```
+
+Random Forest:
+
+The basic algorithm for a regression random forest can be generalized to the following:
+
+1.  Given training data set
+2.  Select number of trees to build (ntrees)
+3.  for i = 1 to ntrees do
+4.  |  Generate a bootstrap sample of the original data
+5.  |  Grow a regression tree to the bootstrapped data
+6.  |  for each split do
+7.  |  | Select m variables at random from all p variables
+8.  |  | Pick the best variable/split-point among the m
+9.  |  | Split the node into two child nodes
+10. |  end
+11. | Use typical tree model stopping criteria to determine when a tree is complete (but do not prune)
+12. end
+
+```{r}
+# hyperparameter grid
+hyper_grid.h2o <- list(
+  ntrees      = seq(200, 500, by = 150),
+  mtries      = seq(15, 35, by = 10),
+  max_depth   = seq(20, 40, by = 5),
+  min_rows    = seq(1, 5, by = 2),
+  nbins       = seq(10, 30, by = 5),
+  sample_rate = c(.55, .632, .75)
+)
+
+# random grid search criteria
+search_criteria <- list(
+  strategy = "RandomDiscrete",
+  stopping_metric = "mse",
+  stopping_tolerance = 0.005,
+  stopping_rounds = 10,
+  max_runtime_secs = 30*60
+  )
+
+# build grid search 
+random_grid <- h2o.grid(
+  algorithm = "randomForest",
+  grid_id = "rf_grid2",
+  x = predictors, 
+  y = response, 
+  training_frame = train.h2o,
+  hyper_params = hyper_grid.h2o,
+  search_criteria = search_criteria
+  )
+
+# collect the results and sort by our model performance metric of choice
+grid_perf2 <- h2o.getGrid(
+  grid_id = "rf_grid2", 
+  sort_by = "mse", 
+  decreasing = FALSE
+  )
+print(grid_perf2)
+```
+
+
